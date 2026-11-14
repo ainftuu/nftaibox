@@ -14,13 +14,9 @@ jobs:
             bundle: nsis
             label: Windows-x64
           - os: macos-latest
-            target: aarch64-apple-darwin
+            target: universal-apple-darwin
             bundle: dmg
-            label: macOS-Apple-Silicon
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            bundle: dmg
-            label: macOS-Intel
+            label: macOS-Universal
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +29,7 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
