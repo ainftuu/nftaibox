@@ -321,7 +321,6 @@ export default function Toolbox() {
           >
             还没有账号？前往注册 <ExternalLink size={13} />
           </button>
-          <footer>基于 CC Switch 开源项目构建 · MIT License</footer>
         </main>
       </div>
     );
@@ -583,7 +582,7 @@ export default function Toolbox() {
               <h2>你的账号</h2>
               <p>{snapshot.user.email}</p>
               <p>服务地址：api.nftai.fun</p>
-              <p>版本：0.1.5 · Windows / macOS</p>
+              <p>版本：0.1.6 · Windows / macOS</p>
               <button
                 className="nt-secondary"
                 disabled={!!busy}
@@ -610,12 +609,6 @@ export default function Toolbox() {
               >
                 下载 Node.js <ExternalLink size={14} />
               </button>
-              <hr />
-              <h2>开源致谢</h2>
-              <p>
-                NFTAI 工具箱基于 CC Switch 开发，保留原项目 MIT
-                许可证与版权声明。
-              </p>
             </section>
           )}
         </main>

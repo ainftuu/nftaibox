@@ -159,12 +159,6 @@ select:focus-visible {
   width: 100%;
   color: #718098;
 }
-.nt-login footer {
-  margin-top: 68px;
-  text-align: center;
-  font-size: 10px;
-  color: #a1a9b4;
-}
 .nt-preview {
   background: #fff3de;
   padding: 12px;

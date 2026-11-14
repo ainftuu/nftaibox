@@ -8,4 +8,4 @@
 
 本项目基于 CC Switch 修改，保留 MIT 许可。上游来源和提交见 [UPSTREAM.json](UPSTREAM.json)，原说明见 [docs/upstream-README.md](docs/upstream-README.md)。
 
-当前为 0.1.5 预览版，修复 Chromium 表单策略拦截回首页跳转；授权登录成功后浏览器立即跳转官网首页；概览余额使用钱币图标，余额/密钥图标统一黑底荧光绿，并移除设置页上游项目链接。保留 0.1.2 的桌面版识别、重新检测及 0.1.1 授权修复。macOS 包需在 Mac 或 GitHub macOS runner 构建。
+当前为 0.1.6 预览版，移除登录页与设置页开源说明展示，许可文件随包保留；修复 Chromium 表单策略拦截回首页跳转；授权登录成功后浏览器立即跳转官网首页；概览余额使用钱币图标，余额/密钥图标统一黑底荧光绿，并移除设置页上游项目链接。保留 0.1.2 的桌面版识别、重新检测及 0.1.1 授权修复。macOS 包需在 Mac 或 GitHub macOS runner 构建。

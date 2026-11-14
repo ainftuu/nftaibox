@@ -1,5 +1,7 @@
 # NFTAI 工具箱 · Windows / macOS 第一版
 
+0.1.6：移除登录页底部开源说明、设置页开源致谢标题及正文，删除对应无用样式。LICENSE 与 UPSTREAM.json 作为安装资源随 Windows/macOS 包分发，源码中继续保留版权及许可证文件。
+
 0.1.5：修复 0.1.4 的 303 跳转被 Chromium 表单 CSP 拦截的问题。成功回调返回 200 HTML，完成表单导航后通过零秒 meta refresh 前往官网；保留手动首页链接、no-store/no-referrer、严格回调校验，失败不导航。受限 form-action 的浏览器测试已实际到达 https://nftai.fun/；未使用真实凭据。
 
 0.1.4：本机授权完成且登录凭据保存成功后，返回 HTTP 303，浏览器立即以 GET 打开 https://nftai.fun/，不再停留本机成功页。响应禁止缓存和发送来源，登录失败不跳转；不在首页 URL 中携带登录凭据。
