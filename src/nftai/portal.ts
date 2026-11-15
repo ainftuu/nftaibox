@@ -3,15 +3,15 @@ export const TOOLS = [
     id: "dsh",
     name: "DeepSeek Harness",
     mark: "DS",
-    desc: "图形化编程助手 · 推荐新手",
+    desc: "图形化编程助手 · 桌面版",
     tag: "推荐",
     protocols: ["openai-completions", "openai-responses", "anthropic-messages"],
   },
   {
     id: "claude",
-    name: "Claude Code",
+    name: "Claude 桌面版",
     mark: "✳",
-    desc: "在终端里完成开发与代码修改",
+    desc: "图形化 AI 助手 · 桌面版",
     tag: "热门",
     protocols: ["anthropic-messages"],
   },
@@ -19,7 +19,7 @@ export const TOOLS = [
     id: "codex",
     name: "Codex",
     mark: "›_",
-    desc: "OpenAI 编程助手 · 桌面版 / 命令行版",
+    desc: "OpenAI 编程助手 · 桌面版",
     tag: "",
     protocols: ["openai-responses"],
   },
@@ -27,7 +27,7 @@ export const TOOLS = [
     id: "opencode",
     name: "OpenCode",
     mark: "OC",
-    desc: "开源编程助手 · 支持多种模型",
+    desc: "开源编程助手 · 桌面版",
     tag: "开源",
     protocols: ["openai-completions", "openai-responses", "anthropic-messages"],
   },
@@ -73,3 +73,10 @@ export function friendlyError(error: unknown) {
     return "连接暂时失败，请检查网络后重试。";
   return message.slice(0, 400);
 }
+
+export const DESKTOP_DOWNLOADS: Record<ToolId, string> = {
+  dsh: "https://www.deepseek.com/en/download/",
+  claude: "https://claude.com/download",
+  codex: "https://chatgpt.com/download/",
+  opencode: "https://opencode.ai/download",
+};

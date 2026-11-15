@@ -427,6 +427,17 @@ fn provider_config(app: &str, api: &str, secret: &str, model: &str) -> Result<Va
         _ => unreachable!(),
     })
 }
+fn configure_desktop_provider(provider: &mut crate::Provider, model: &str) -> Result<(), String> {
+    if !crate::claude_desktop_config::is_claude_safe_model_id(model) {
+        return Err("Claude 桌面版直连需要 Claude 模型，请选择 claude-* 模型".into());
+    }
+    let mut meta = crate::provider::ProviderMeta::default();
+    meta.claude_desktop_model_routes.insert(model.to_string(), crate::provider::ClaudeDesktopModelRoute {
+        model: model.to_string(), label_override: None, supports_1m: None,
+    });
+    provider.meta = Some(meta);
+    Ok(())
+}
 #[tauri::command]
 pub async fn nftai_apply(
     app: tauri::AppHandle,
@@ -448,12 +459,17 @@ pub async fn nftai_apply(
         "nftai-{}-{key_id}",
         key["user_id"].as_i64().ok_or("密钥缺少账户归属")?
     );
-    let provider = crate::Provider::with_id(
+    let mut provider = crate::Provider::with_id(
         id.clone(),
         format!("NFTAI · {}", key["name"].as_str().unwrap_or("专用密钥")),
         settings,
         Some("https://nftai.fun".into()),
     );
+    // Persist to Desktop's own store and 3P profile, never CLI settings.
+    if tool == "claude" {
+        configure_desktop_provider(&mut provider, &model)?;
+    }
+    let tool = if tool == "claude" { "claude-desktop".to_string() } else { tool };
     let existing = crate::commands::get_providers(app.state(), tool.clone()).await?;
     if existing.contains_key(&id) {
         crate::commands::update_provider(app.clone(), tool.clone(), provider, None, None).await?;
@@ -461,7 +477,7 @@ pub async fn nftai_apply(
         crate::commands::add_provider(app.clone(), tool.clone(), provider, Some(true), None)
             .await?;
     }
-    let warnings = if matches!(tool.as_str(), "claude" | "codex") {
+    let warnings = if matches!(tool.as_str(), "claude-desktop" | "codex") {
         crate::commands::switch_provider(app.clone(), tool.clone(), id.clone())
             .await?
             .warnings
@@ -486,6 +502,18 @@ pub async fn nftai_launch(tool: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_profile_contains_selected_gateway_and_model() {
+        let settings = provider_config("claude", "anthropic-messages", "test-secret", "claude-sonnet-4-5").unwrap();
+        let mut provider = crate::Provider::with_id("test".into(), "test".into(), settings, None);
+        configure_desktop_provider(&mut provider, "claude-sonnet-4-5").unwrap();
+        let profile = crate::claude_desktop_config::direct_target(Some(&provider)).unwrap().unwrap();
+        assert_eq!(profile["inferenceProvider"], "gateway");
+        assert_eq!(profile["inferenceGatewayBaseUrl"], ORIGIN);
+        assert_eq!(profile["inferenceGatewayApiKey"], "test-secret");
+        assert_eq!(profile["inferenceModels"][0], "claude-sonnet-4-5");
+        assert!(configure_desktop_provider(&mut provider, "deepseek-chat").is_err());
+    }
     #[tokio::test]
     async fn successful_login_commits_html_before_navigating_home() {
         let response = login_success_response();

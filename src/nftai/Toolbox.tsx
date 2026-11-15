@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import {
   TOOLS,
+  DESKTOP_DOWNLOADS,
   chooseModel,
   compatibleKeys,
   friendlyError,
@@ -40,7 +41,7 @@ type Version = {
   desktop_version?: string | null;
   desktop_configurable?: boolean;
 };
-const toolReady = (v?: Version) => !!v?.desktop_configurable || (!!v?.version && !v.installed_but_broken);
+const toolReady = (v?: Version) => !!v?.desktop_configurable;
 type ApplyResult = { providerId: string; warnings: string[]; message: string };
 export default function Toolbox() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -193,19 +194,13 @@ export default function Toolbox() {
     if (!selection || !keyId || !model || modelBusy) return;
     const tool = selection;
     await run(tool, async () => {
-      const version = versions.find((v) => v.name === tool);
+      const detected = await invoke<Version[]>("nftai_detect_tools");
+      setVersions(detected);
+      const version = detected.find((v) => v.name === tool);
       if (!toolReady(version)) {
-        await invoke("nftai_prepare_runtime", { tool });
-        setNotice("正在安装，请留意系统弹出的安装确认…");
-        await invoke("run_tool_lifecycle_action", {
-          tools: [tool],
-          action: "install",
-        });
-        // A successful installer exit alone does not prove that the tool is usable.
-        const checked = await invoke<Version[]>("nftai_detect_tools");
-        if (!toolReady(checked.find((v) => v.name === tool)))
-          throw new Error("安装后仍无法运行工具，请重开工具箱后检查安装环境。");
-        await refreshTools();
+        await open(DESKTOP_DOWNLOADS[tool]);
+        setNotice("已打开桌面版官方下载页。安装完成后回到这里，重新检测并应用配置。");
+        return;
       }
       setNotice("正在验证模型并应用配置…");
       const result = await invoke<ApplyResult>("nftai_apply", {
@@ -416,10 +411,10 @@ export default function Toolbox() {
                   <button
                     className="nt-link"
                     onClick={() =>
-                      void open("https://api.nftai.fun/wallet").catch(fail)
+                      void open("https://api.nftai.fun/purchase").catch(fail)
                     }
                   >
-                    前往网站 <ChevronRight size={15} />
+                    前往充值 <ChevronRight size={15} />
                   </button>
                 </article>
                 <article>
@@ -485,14 +480,8 @@ export default function Toolbox() {
                             detecting ? "正在检测本机…" : "尚未完成检测"
                           ) : v.desktop_configurable ? (
                             `已安装 · ${v.desktop_name}${v.desktop_version ? ` ${v.desktop_version}` : ""}`
-                          ) : v?.installed_but_broken ? (
-                            "已安装，运行异常"
-                          ) : v?.version ? (
-                            `已安装命令行版 · ${v.version}`
-                          ) : v.desktop_name ? (
-                            `已安装 ${v.desktop_name}；Claude Code 命令行未安装`
                           ) : (
-                            "尚未检测到安装"
+                            "尚未检测到桌面版安装"
                           )}
                           <span>·</span>
                           {count ? `${count} 个适配密钥` : "暂无适配密钥"}
@@ -516,14 +505,21 @@ export default function Toolbox() {
                         <button
                           className="nt-primary"
                           disabled={!!busy || detecting || !v}
-                          onClick={() => configure(tool.id)}
+                          onClick={() => {
+                            if (!toolReady(v)) {
+                              void run(tool.id, async () => {
+                                await open(DESKTOP_DOWNLOADS[tool.id]);
+                                setNotice("请安装桌面版，完成后点击重新检测，再配置模型。");
+                              });
+                            } else configure(tool.id);
+                          }}
                         >
                           {busy === tool.id ? (
                             <RefreshCw className="nt-spin" size={15} />
                           ) : (
                             <Download size={15} />
                           )}
-                          {toolReady(v) ? "配置模型" : v?.desktop_name ? "安装命令行并配置" : "安装并配置"}
+                          {toolReady(v) ? "配置模型" : "下载桌面版并配置"}
                         </button>
                       </div>
                     </article>
@@ -582,7 +578,7 @@ export default function Toolbox() {
               <h2>你的账号</h2>
               <p>{snapshot.user.email}</p>
               <p>服务地址：api.nftai.fun</p>
-              <p>版本：0.1.6 · Windows / macOS</p>
+              <p>版本：0.1.8 · Windows / macOS</p>
               <button
                 className="nt-secondary"
                 disabled={!!busy}
@@ -633,7 +629,7 @@ export default function Toolbox() {
             <h2 id="nt-dialog-title">
               准备 {TOOLS.find((t) => t.id === selection)?.name}
             </h2>
-            <p>{toolReady(versions.find((v) => v.name === selection)) ? "已检测到安装，确认后直接应用配置。" : "已为你筛选适配密钥。确认后自动安装命令行工具并应用配置。"}</p>
+            <p>{toolReady(versions.find((v) => v.name === selection)) ? "已检测到桌面版，确认后直接应用配置。" : "请先从官方下载页安装桌面版，再回来应用配置。"}</p>
             <label>
               API 密钥
               <select
@@ -651,7 +647,7 @@ export default function Toolbox() {
             </label>
             {!compatibleKeys(selection, keys).length && (
               <div className="nt-error">
-                暂无适配密钥。Claude Code 需要 Anthropic 协议分组，Codex 需要
+                暂无适配密钥。Claude 桌面版需要 Anthropic 协议分组，Codex 需要
                 Responses 协议分组。请先在网站创建对应密钥，再同步。
               </div>
             )}
@@ -718,7 +714,7 @@ export default function Toolbox() {
                 </>
               ) : (
                 <>
-                  {toolReady(versions.find((v) => v.name === selection)) ? "应用配置" : "安装并应用配置"}
+                  {toolReady(versions.find((v) => v.name === selection)) ? "应用配置" : "下载桌面版"}
                   <ArrowRight size={16} />
                 </>
               )}

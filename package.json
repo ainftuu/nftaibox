@@ -1,6 +1,6 @@
 {
   "name": "nftai-toolbox",
-  "version": "0.1.6",
+  "version": "0.1.8",
   "description": "NFTAI 中转站专属 AI 编程工具箱",
   "type": "module",
   "scripts": {

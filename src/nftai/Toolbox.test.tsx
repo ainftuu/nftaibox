@@ -65,20 +65,56 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 describe("guided configuration safety", () => {
+  it("downloads Desktop even with no compatible key and never installs the CLI", async () => {
+    const normal = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "nftai_detect_tools") return Promise.resolve([
+        {name:"claude", version:"2.0", desktop_configurable:false, installed_but_broken:false},
+      ]);
+      return normal(command, args);
+    });
+    render(<Toolbox />);
+    await screen.findAllByText(/尚未检测到桌面版安装/);
+    fireEvent.click(screen.getAllByRole("button", {name:"下载桌面版并配置"}).find(b => !b.hasAttribute("disabled"))!);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_external", {url:"https://claude.com/download"}));
+    expect(invoke.mock.calls.some(([c]) => c === "run_tool_lifecycle_action" || c === "nftai_prepare_runtime")).toBe(false);
+  });
+  it("applies and launches an installed Claude desktop without CLI installation", async () => {
+    const normal = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "nftai_detect_tools") return Promise.resolve([
+        {name:"claude", version:null, desktop_name:"Claude 桌面版", desktop_configurable:true},
+      ]);
+      if (command === "nftai_snapshot") return Promise.resolve({user:{id:1,username:"测试",balance:1},keys:[{...keys[0],protocol:"anthropic-messages"}]});
+      if (command === "nftai_models") return Promise.resolve(["claude-sonnet-4-5"]);
+      if (command === "nftai_apply") return Promise.resolve({providerId:"p",warnings:[],message:"已配置"});
+      return normal(command,args);
+    });
+    render(<Toolbox />);
+    await screen.findByText(/已安装 · Claude 桌面版/);
+    fireEvent.click(screen.getByRole("button", {name:"启动"}));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("nftai_launch", {tool:"claude"}));
+    fireEvent.click(screen.getByRole("button", {name:"配置模型"}));
+    await waitFor(() => expect(screen.getByLabelText("使用模型")).toHaveValue("claude-sonnet-4-5"));
+    fireEvent.click(screen.getByRole("button", {name:"应用配置"}));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("nftai_apply", {tool:"claude",keyId:1,model:"claude-sonnet-4-5"}));
+    expect(invoke.mock.calls.some(([c]) => c === "run_tool_lifecycle_action")).toBe(false);
+  });
+
   it("configures an installed DSH desktop without reinstalling its CLI", async () => {
     const normal = invoke.getMockImplementation()!;
     invoke.mockImplementation((command: string, args?: unknown) => {
       if (command === "nftai_detect_tools") return Promise.resolve([
         {name:"dsh", version:null, desktop_name:"DeepSeek Harness 桌面版", desktop_configurable:true},
-        {name:"claude", version:null, desktop_name:"Claude 桌面版", desktop_configurable:false},
+        {name:"claude", version:null, desktop_name:"Claude 桌面版", desktop_configurable:true},
       ]);
       if (command === "nftai_apply") return Promise.resolve({providerId:"p",warnings:[],message:"已配置"});
       return normal(command, args);
     });
     render(<Toolbox />);
     await screen.findByText(/已安装 · DeepSeek Harness 桌面版/);
-    expect(screen.getByText(/Claude Code 命令行未安装/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", {name:"配置模型"}));
+    expect(screen.getByText(/已安装 · Claude 桌面版/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", {name:"配置模型"})[0]);
     await waitFor(() => expect(screen.getByLabelText("使用模型")).toHaveValue("deepseek-chat"));
     fireEvent.click(screen.getByRole("button", {name:"应用配置"}));
     await waitFor(() => expect(invoke.mock.calls.some(([c]) => c === "nftai_apply")).toBe(true));
@@ -91,7 +127,7 @@ describe("guided configuration safety", () => {
     await screen.findByRole("heading", {name:"开始你的 AI 编程"});
     expect(screen.queryByText("尚未检测到安装")).not.toBeInTheDocument();
     expect(screen.getByRole("button", {name:"正在检测本机…"})).toBeDisabled();
-    for (const button of screen.getAllByRole("button", {name:"安装并配置"})) expect(button).toBeDisabled();
+    for (const button of screen.getAllByRole("button", {name:"下载桌面版并配置"})) expect(button).toBeDisabled();
   });
   it("explains an undeployed authorization service without opening a broken browser page", async () => {
     const normal = invoke.getMockImplementation()!;
@@ -124,23 +160,23 @@ describe("guided configuration safety", () => {
     expect(snapshots).toBeGreaterThan(1);
     expect(screen.queryByText(/等待浏览器完成授权/)).not.toBeInTheDocument();
   });
-  it("never writes configuration after installation fails", async () => {
+  it("links directly to recharge", async () => {
     render(<Toolbox />);
-    await screen.findByRole("heading", { name: "开始你的 AI 编程" });
-    fireEvent.click(screen.getAllByRole("button", { name: "安装并配置" })[0]);
-    await waitFor(() =>
-      expect(screen.getByLabelText("使用模型")).toHaveValue("deepseek-chat"),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "安装并应用配置" }));
-    await screen.findAllByText(/安装失败，请重试/);
-    expect(
-      invoke.mock.calls.some(
-        ([command]) => command === "run_tool_lifecycle_action",
-      ),
-    ).toBe(true);
-    expect(
-      invoke.mock.calls.some(([command]) => command === "nftai_apply"),
-    ).toBe(false);
+    fireEvent.click(await screen.findByRole("button", {name:"前往充值"}));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_external", {url:"https://api.nftai.fun/purchase"}));
+  });
+  it.each(["dsh", "codex", "opencode"])("%s downloads Desktop instead of installing CLI", async (tool) => {
+    const normal = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "nftai_detect_tools") return Promise.resolve([{name:tool,version:"1.0",desktop_configurable:false}]);
+      return normal(command,args);
+    });
+    render(<Toolbox />);
+    await waitFor(() => expect(screen.getAllByRole("button", {name:"下载桌面版并配置"}).some(b => !b.hasAttribute("disabled"))).toBe(true));
+    const button = screen.getAllByRole("button", {name:"下载桌面版并配置"}).find(b => !b.hasAttribute("disabled"))!;
+    fireEvent.click(button);
+    await waitFor(() => expect(invoke.mock.calls.some(([c]) => c === "open_external")).toBe(true));
+    expect(invoke.mock.calls.some(([c]) => c === "run_tool_lifecycle_action" || c === "nftai_apply")).toBe(false);
   });
   it("does not mix late model responses from a previously selected key", async () => {
     let resolveFirst!: (value: string[]) => void;
@@ -155,9 +191,11 @@ describe("guided configuration safety", () => {
           : Promise.resolve(["second-key-model"]);
       return normal(command, args);
     });
+    const withModels = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args?: unknown) => command === "nftai_detect_tools" ? Promise.resolve([{name:"dsh",desktop_name:"DeepSeek Harness 桌面版",desktop_configurable:true}]) : withModels(command,args));
     render(<Toolbox />);
-    await screen.findByRole("heading", { name: "开始你的 AI 编程" });
-    fireEvent.click(screen.getAllByRole("button", { name: "安装并配置" })[0]);
+    await screen.findByRole("button", {name:"配置模型"});
+    fireEvent.click(screen.getByRole("button", {name:"配置模型"}));
     fireEvent.change(screen.getByLabelText("API 密钥"), {
       target: { value: "2" },
     });

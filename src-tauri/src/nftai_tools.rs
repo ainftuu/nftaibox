@@ -30,14 +30,27 @@ fn status(tool: &str, desktop: Option<&Desktop>, cli: Result<Option<String>, Str
         name: tool.into(), installed_but_broken: error.is_some(), version, error,
         desktop_name: desktop.map(|d| d.name.clone()),
         desktop_version: desktop.and_then(|d| d.version.clone()),
-        // Claude Desktop is a different product/configuration from Claude Code.
-        desktop_configurable: desktop.is_some() && matches!(tool, "dsh" | "codex"),
+        // Toolbox Claude targets Desktop exclusively; a CLI installation is insufficient.
+        desktop_configurable: desktop.is_some() && matches!(tool, "dsh" | "codex" | "claude" | "opencode"),
     }
 }
 
 fn dsh_desktop(root: &Path) -> Option<Desktop> {
     let path = root.join("Programs/DeepSeek Harness/DeepSeek Harness.exe");
     path.is_file().then(|| Desktop { name: "DeepSeek Harness 桌面版".into(), version: None, path, app_id: None })
+}
+
+fn opencode_desktop(roots: &[PathBuf]) -> Option<Desktop> {
+    roots.iter().flat_map(|root| [
+        root.join("OpenCode/OpenCode.exe"),
+        root.join("OpenCode/opencode.exe"),
+        root.join("Programs/OpenCode/OpenCode.exe"),
+        root.join("Programs/OpenCode/opencode.exe"),
+        root.join("ai.opencode.desktop/OpenCode.exe"),
+        root.join("ai.opencode.desktop/opencode.exe"),
+    ]).find(|p| p.is_file()).map(|path| Desktop {
+        name: "OpenCode 桌面版".into(), version: None, path, app_id: None,
+    })
 }
 
 #[cfg(windows)]
@@ -48,6 +61,10 @@ fn desktops() -> std::collections::HashMap<String, Desktop> {
     if let Some(root) = std::env::var_os("LOCALAPPDATA") {
         if let Some(d) = dsh_desktop(Path::new(&root)) { result.insert("dsh".into(), d); }
     }
+    let mut roots = Vec::new();
+    if let Some(root) = std::env::var_os("LOCALAPPDATA") { roots.push(PathBuf::from(root)); }
+    if let Some(root) = std::env::var_os("ProgramFiles") { roots.push(PathBuf::from(root)); }
+    if let Some(d) = opencode_desktop(&roots) { result.insert("opencode".into(), d); }
     // Query installed package metadata once. Never run desktop binaries with --version.
     // Launch IDs come from each installed package's own manifest, not guessed App IDs.
     let script = r#"$ErrorActionPreference='Stop'; $items=@(Get-AppxPackage | Where-Object { $_.Name -in @('OpenAI.Codex','Claude') } | ForEach-Object { $p=$_; $m=Get-AppxPackageManifest -Package $p.PackageFullName; $a=@($m.Package.Applications.Application)[0]; if($a) { @{name=$p.Name; version=$p.Version.ToString(); path=$p.InstallLocation; app_id=($p.PackageFamilyName+'!'+$a.Id)} } }); ConvertTo-Json -InputObject $items -Compress"#;
@@ -78,7 +95,7 @@ fn desktops() -> std::collections::HashMap<String, Desktop> {
 fn desktops() -> std::collections::HashMap<String, Desktop> {
     let mut result = std::collections::HashMap::new();
     #[cfg(target_os = "macos")]
-    for (tool, label) in [("dsh", "DeepSeek Harness"), ("codex", "Codex"), ("claude", "Claude")] {
+    for (tool, label) in [("dsh", "DeepSeek Harness"), ("codex", "Codex"), ("claude", "Claude"), ("opencode", "OpenCode")] {
         let roots = [PathBuf::from("/Applications"), crate::config::get_home_dir().join("Applications")];
         if let Some(path) = roots.iter().map(|r| r.join(format!("{label}.app"))).find(|p| p.is_dir()) {
             result.insert(tool.into(), Desktop { name: format!("{label} 桌面版"), version: None, path, app_id: None });
@@ -91,9 +108,7 @@ fn detect() -> Vec<Installation> {
     let installed = desktops();
     ["dsh", "claude", "codex", "opencode"].iter().map(|tool| {
         let desktop = installed.get(*tool);
-        let cli = if desktop.is_some() && matches!(*tool, "dsh" | "codex") {
-            Ok(None)
-        } else { crate::commands::nftai_probe_local_tool(tool) };
+        let cli = Ok(None);
         status(tool, desktop, cli)
     }).collect()
 }
@@ -105,7 +120,7 @@ pub(crate) async fn nftai_detect_tools() -> Result<Vec<Installation>, String> {
 
 pub(crate) fn launch(tool: &str) -> Result<(), String> {
     if !matches!(tool, "dsh" | "codex" | "claude" | "opencode") { return Err("不支持的工具".into()); }
-    if matches!(tool, "dsh" | "codex") {
+    if matches!(tool, "dsh" | "codex" | "claude" | "opencode") {
         if let Some(d) = desktops().remove(tool) {
             #[cfg(windows)]
             {
@@ -121,7 +136,7 @@ pub(crate) fn launch(tool: &str) -> Result<(), String> {
             { std::process::Command::new("/usr/bin/open").arg(d.path).spawn().map_err(|e| format!("启动桌面版失败：{e}"))?; return Ok(()); }
         }
     }
-    crate::commands::nftai_launch_installed(tool)
+    Err("未检测到桌面版，请先完成安装并重新检测".into())
 }
 
 #[cfg(test)]
@@ -133,10 +148,19 @@ mod tests {
         assert!(status("dsh", Some(&d), Ok(None)).desktop_configurable);
         assert!(status("codex", Some(&d), Ok(None)).desktop_configurable);
         let claude = status("claude", Some(&d), Ok(None));
-        assert!(!claude.desktop_configurable);
+        assert!(claude.desktop_configurable);
         assert!(claude.version.is_none());
         assert!(claude.desktop_name.is_some());
         assert!(status("claude", None, Err("broken".into())).installed_but_broken);
+    }
+    #[test]
+    fn opencode_desktop_requires_gui_at_install_location() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(opencode_desktop(&[temp.path().into()]).is_none());
+        let gui = temp.path().join("Programs/OpenCode");
+        std::fs::create_dir_all(&gui).unwrap();
+        std::fs::write(gui.join("OpenCode.exe"), "fixture").unwrap();
+        assert!(opencode_desktop(&[temp.path().into()]).is_some());
     }
     #[test]
     fn dsh_requires_an_actual_desktop_executable() {
