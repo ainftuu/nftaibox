@@ -1,3 +1,7 @@
+const MODEL_PROTOCOLS: readonly string[] = [
+  "openai-completions", "openai-responses", "anthropic-messages",
+];
+
 export const TOOLS = [
   {
     id: "dsh",
@@ -5,7 +9,6 @@ export const TOOLS = [
     mark: "DS",
     desc: "图形化编程助手 · 桌面版",
     tag: "推荐",
-    protocols: ["openai-completions", "openai-responses", "anthropic-messages"],
   },
   {
     id: "claude",
@@ -13,7 +16,6 @@ export const TOOLS = [
     mark: "✳",
     desc: "图形化 AI 助手 · 桌面版",
     tag: "热门",
-    protocols: ["anthropic-messages"],
   },
   {
     id: "codex",
@@ -21,7 +23,6 @@ export const TOOLS = [
     mark: "›_",
     desc: "OpenAI 编程助手 · 桌面版",
     tag: "",
-    protocols: ["openai-responses"],
   },
   {
     id: "opencode",
@@ -29,7 +30,6 @@ export const TOOLS = [
     mark: "OC",
     desc: "开源编程助手 · 桌面版",
     tag: "开源",
-    protocols: ["openai-completions", "openai-responses", "anthropic-messages"],
   },
 ] as const;
 export type ToolId = (typeof TOOLS)[number]["id"];
@@ -39,6 +39,8 @@ export interface PortalKey {
   group: string | null;
   protocol: string;
   usable: boolean;
+  codex_cli_only?: boolean;
+  claude_code_only?: boolean;
   status: string;
   quota: number;
   quota_used: number;
@@ -48,11 +50,15 @@ export interface Snapshot {
   user: { id: number; username: string; email: string; balance: number };
   keys: PortalKey[];
 }
+export function keyRestriction(tool: ToolId, key: PortalKey) {
+  if (!key.usable) return "已停用、到期或额度不足";
+  if (key.claude_code_only && tool !== "claude") return "仅限 Claude 官方客户端";
+  if (key.codex_cli_only && tool !== "codex") return "仅限 Codex";
+  if (!MODEL_PROTOCOLS.includes(key.protocol)) return "未识别分组协议";
+  return "";
+}
 export function compatibleKeys(tool: ToolId, keys: PortalKey[]) {
-  const protocols: readonly string[] = TOOLS.find(
-    (t) => t.id === tool,
-  )!.protocols;
-  return keys.filter((k) => k.usable && protocols.includes(k.protocol));
+  return keys.filter((key) => !keyRestriction(tool, key));
 }
 export function chooseModel(tool: ToolId, models: string[]) {
   const pattern =

@@ -1,6 +1,6 @@
 [package]
 name = "nftai-toolbox"
-version = "0.1.8"
+version = "0.1.11"
 description = "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 authors = ["Jason Young"]
 license = "MIT"

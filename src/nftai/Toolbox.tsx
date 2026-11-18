@@ -24,6 +24,7 @@ import {
   DESKTOP_DOWNLOADS,
   chooseModel,
   compatibleKeys,
+  keyRestriction,
   friendlyError,
   type Snapshot,
   type ToolId,
@@ -60,8 +61,10 @@ export default function Toolbox() {
   const [model, setModel] = useState("");
   const [modelBusy, setModelBusy] = useState(false);
   const [modelError, setModelError] = useState("");
+  const [modelRefresh, setModelRefresh] = useState(0);
   const [applied, setApplied] = useState<Record<string, ApplyResult>>({});
   const modelRequest = useRef(0);
+  const modelScope = useRef("");
   const actionLock = useRef(false);
   const open = (url: string) =>
     native
@@ -150,19 +153,25 @@ export default function Toolbox() {
   }, [loginPending, sync]);
   useEffect(() => {
     const request = ++modelRequest.current;
+    const scope = `${selection ?? ""}:${keyId}`;
+    if (modelScope.current !== scope) {
+      modelScope.current = scope;
+      setModel("");
+    }
     setModels([]);
-    setModel("");
     setModelError("");
     if (!keyId || !selection || !native) {
       setModelBusy(false);
       return;
     }
     setModelBusy(true);
-    void invoke<string[]>("nftai_models", { keyId })
+    void invoke<string[]>("nftai_models", { keyId, tool: selection })
       .then((list) => {
         if (request !== modelRequest.current) return;
         setModels(list);
-        setModel(chooseModel(selection, list));
+        setModel((current) =>
+          list.includes(current) ? current : chooseModel(selection, list),
+        );
       })
       .catch((e) => {
         if (request === modelRequest.current) setModelError(friendlyError(e));
@@ -170,7 +179,8 @@ export default function Toolbox() {
       .finally(() => {
         if (request === modelRequest.current) setModelBusy(false);
       });
-  }, [keyId, selection]);
+    return () => { modelRequest.current++; };
+  }, [keyId, selection, modelRefresh]);
   async function run(id: string, task: () => Promise<void>) {
     if (actionLock.current) return;
     actionLock.current = true;
@@ -191,7 +201,7 @@ export default function Toolbox() {
     setKeyId(compatibleKeys(tool, snapshot?.keys ?? [])[0]?.id ?? 0);
   }
   async function installAndApply() {
-    if (!selection || !keyId || !model || modelBusy) return;
+    if (!selection || !keyId || !models.includes(model) || modelBusy) return;
     const tool = selection;
     await run(tool, async () => {
       const detected = await invoke<Version[]>("nftai_detect_tools");
@@ -375,6 +385,7 @@ export default function Toolbox() {
               onClick={() =>
                 void run("sync", async () => {
                   await sync();
+                  setModelRefresh((value) => value + 1);
                   await refreshTools();
                   setNotice("账户、密钥与工具状态已同步。");
                 })
@@ -578,7 +589,7 @@ export default function Toolbox() {
               <h2>你的账号</h2>
               <p>{snapshot.user.email}</p>
               <p>服务地址：api.nftai.fun</p>
-              <p>版本：0.1.8 · Windows / macOS</p>
+              <p>版本：0.1.11 · Windows / macOS</p>
               <button
                 className="nt-secondary"
                 disabled={!!busy}
@@ -638,18 +649,20 @@ export default function Toolbox() {
                 onChange={(e) => setKeyId(Number(e.target.value))}
               >
                 <option value={0}>请选择密钥</option>
-                {compatibleKeys(selection, keys).map((key) => (
-                  <option key={key.id} value={key.id}>
-                    {key.name} · {key.group || "默认分组"}
+                {keys.map((key) => (
+                  <option key={key.id} value={key.id} disabled={!!keyRestriction(selection, key)}>
+                    {[key.name, key.group || "默认分组", keyRestriction(selection, key)].filter(Boolean).join(" · ")}
                   </option>
                 ))}
               </select>
             </label>
             {!compatibleKeys(selection, keys).length && (
               <div className="nt-error">
-                暂无适配密钥。Claude 桌面版需要 Anthropic 协议分组，Codex 需要
-                Responses 协议分组。请先在网站创建对应密钥，再同步。
+                暂无可用于此工具的密钥。请检查网站密钥分组的协议和客户端限制，再同步密钥。
               </div>
+            )}
+            {(selection === "codex" || selection === "claude") && (
+              <p className="nt-footnote">可选不同供应商的密钥和模型。需要协议转接时，请保持工具箱运行。</p>
             )}
             <label>
               使用模型
@@ -668,21 +681,21 @@ export default function Toolbox() {
                 ))}
               </select>
             </label>
+            <button
+              className="nt-secondary"
+              disabled={!keyId || modelBusy || !!busy}
+              onClick={() => setModelRefresh((value) => value + 1)}
+            >
+              <RefreshCw size={15} /> 刷新密钥模型
+            </button>
             {modelError && (
               <div role="alert" className="nt-error">
                 {modelError}
-                <button
-                  className="nt-link"
-                  onClick={() => {
-                    const current = keyId;
-                    setKeyId(0);
-                    window.setTimeout(() => setKeyId(current), 0);
-                  }}
-                >
-                  重试
-                </button>
               </div>
             )}
+            <p className="nt-footnote">
+              应用时会重新获取此密钥的模型，并同步到工具的模型列表。平台新增模型后，无需更新工具箱，重新应用配置即可；如果列表未刷新，请完全退出再打开工具。
+            </p>
             {selection === "dsh" && (
               <p className="nt-footnote">
                 首次导入后，需要在 DSH 的模型选择器中选择 NFTAI 下的模型。
@@ -704,7 +717,7 @@ export default function Toolbox() {
             )}
             <button
               className="nt-primary nt-full"
-              disabled={!!busy || !keyId || !model || modelBusy}
+              disabled={!!busy || !keyId || !models.includes(model) || modelBusy}
               onClick={() => void installAndApply()}
             >
               {busy ? (
@@ -714,7 +727,9 @@ export default function Toolbox() {
                 </>
               ) : (
                 <>
-                  {toolReady(versions.find((v) => v.name === selection)) ? "应用配置" : "下载桌面版"}
+                  {toolReady(versions.find((v) => v.name === selection))
+                    ? "同步模型并应用配置"
+                    : "下载桌面版"}
                   <ArrowRight size={16} />
                 </>
               )}

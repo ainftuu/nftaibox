@@ -19,10 +19,13 @@ describe("NFTAI guided configuration", () => {
       key(3, "openai-responses"),
       key(4, "anthropic-messages", false),
       key(5, "unknown"),
+      { ...key(6, "openai-responses"), codex_cli_only: true },
+      { ...key(7, "anthropic-messages"), claude_code_only: true },
     ];
-    expect(compatibleKeys("claude", keys).map((k) => k.id)).toEqual([2]);
-    expect(compatibleKeys("codex", keys).map((k) => k.id)).toEqual([3]);
+    expect(compatibleKeys("claude", keys).map((k) => k.id)).toEqual([1, 2, 3, 7]);
+    expect(compatibleKeys("codex", keys).map((k) => k.id)).toEqual([1, 2, 3, 6]);
     expect(compatibleKeys("dsh", keys).map((k) => k.id)).toEqual([1, 2, 3]);
+    expect(compatibleKeys("opencode", keys).map((k) => k.id)).toEqual([1, 2, 3]);
   });
   it("recommends only models actually returned by the gateway", () => {
     expect(chooseModel("dsh", ["custom-x", "deepseek-chat"])).toBe(

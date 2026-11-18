@@ -65,6 +65,42 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 describe("guided configuration safety", () => {
+  it("discovers a new model without changing a still-available selection", async () => {
+    const normal = invoke.getMockImplementation()!;
+    let modelRequests = 0;
+    invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "nftai_detect_tools") return [{ name: "dsh", desktop_configurable: true }];
+      if (command === "nftai_models") return ++modelRequests === 1 ? ["initial-model", "preferred-model"] : ["new-model", "preferred-model"];
+      return normal(command, args);
+    });
+    render(<Toolbox />);
+    fireEvent.click(await screen.findByRole("button", { name: "配置模型" }));
+    await screen.findByRole("option", { name: "initial-model" });
+    fireEvent.change(screen.getByLabelText("使用模型"), { target: { value: "preferred-model" } });
+    fireEvent.click(screen.getByRole("button", { name: "刷新密钥模型" }));
+    await screen.findByRole("option", { name: "new-model" });
+    expect(screen.queryByRole("option", { name: "initial-model" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("使用模型")).toHaveValue("preferred-model");
+    expect(invoke.mock.calls.filter(([command]) => command === "nftai_models")).toEqual([
+      ["nftai_models", { keyId: 1, tool: "dsh" }], ["nftai_models", { keyId: 1, tool: "dsh" }],
+    ]);
+  });
+  it("blocks applying a stale selection when refreshing models fails", async () => {
+    const normal = invoke.getMockImplementation()!;
+    let modelRequests = 0;
+    invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "nftai_detect_tools") return [{ name: "dsh", desktop_configurable: true }];
+      if (command === "nftai_models" && ++modelRequests > 1) throw new Error("模型列表暂不可用");
+      return normal(command, args);
+    });
+    render(<Toolbox />);
+    fireEvent.click(await screen.findByRole("button", { name: "配置模型" }));
+    await screen.findByRole("option", { name: "deepseek-chat" });
+    fireEvent.click(screen.getByRole("button", { name: "刷新密钥模型" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("模型列表暂不可用");
+    expect(screen.getByRole("button", { name: "同步模型并应用配置" })).toBeDisabled();
+    expect(invoke.mock.calls.some(([command]) => command === "nftai_apply")).toBe(false);
+  });
   it("downloads Desktop even with no compatible key and never installs the CLI", async () => {
     const normal = invoke.getMockImplementation()!;
     invoke.mockImplementation((command: string, args?: unknown) => {
@@ -96,7 +132,7 @@ describe("guided configuration safety", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("nftai_launch", {tool:"claude"}));
     fireEvent.click(screen.getByRole("button", {name:"配置模型"}));
     await waitFor(() => expect(screen.getByLabelText("使用模型")).toHaveValue("claude-sonnet-4-5"));
-    fireEvent.click(screen.getByRole("button", {name:"应用配置"}));
+    fireEvent.click(screen.getByRole("button", {name:"同步模型并应用配置"}));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("nftai_apply", {tool:"claude",keyId:1,model:"claude-sonnet-4-5"}));
     expect(invoke.mock.calls.some(([c]) => c === "run_tool_lifecycle_action")).toBe(false);
   });
@@ -116,7 +152,7 @@ describe("guided configuration safety", () => {
     expect(screen.getByText(/已安装 · Claude 桌面版/)).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", {name:"配置模型"})[0]);
     await waitFor(() => expect(screen.getByLabelText("使用模型")).toHaveValue("deepseek-chat"));
-    fireEvent.click(screen.getByRole("button", {name:"应用配置"}));
+    fireEvent.click(screen.getByRole("button", {name:"同步模型并应用配置"}));
     await waitFor(() => expect(invoke.mock.calls.some(([c]) => c === "nftai_apply")).toBe(true));
     expect(invoke.mock.calls.some(([c]) => c === "run_tool_lifecycle_action")).toBe(false);
   });

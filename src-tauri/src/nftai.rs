@@ -307,21 +307,40 @@ async fn all_keys() -> Result<Vec<Value>, String> {
         let value = portal(&format!("/keys?page={page}&page_size=100")).await?;
         let items = value["items"].as_array().ok_or("密钥列表格式异常")?;
         keys.extend(items.iter().cloned());
-        if items.len() < 100
-            || value["total"]
-                .as_u64()
-                .is_some_and(|n| keys.len() as u64 >= n)
+        if items.is_empty() || value["total"].as_u64()
+            .map_or(items.len() < 100, |total| keys.len() as u64 >= total)
         {
             return Ok(keys);
         }
     }
     Err("密钥数量超过同步上限，请先整理密钥".into())
 }
+fn group_id(key: &Value) -> Option<i64> {
+    key["group_id"].as_i64().or_else(|| key["group"]["id"].as_i64())
+}
+
+fn fill_group(key: &mut Value, groups: &Value) {
+    let Some(id) = group_id(key) else { return };
+    if let Some(group) = groups.as_array().into_iter().flatten().find(|group| group["id"] == id) {
+        key["group"] = group.clone();
+    }
+}
+
+async fn hydrate_groups(keys: &mut [Value]) -> Result<(), String> {
+    if keys.iter().any(|key| group_id(key).is_some() && key["group"]["platform"].as_str().unwrap_or("").is_empty()) {
+        let groups = portal("/groups/available").await?;
+        for key in keys.iter_mut().filter(|key| key["group"]["platform"].as_str().unwrap_or("").is_empty()) {
+            fill_group(key, &groups);
+        }
+    }
+    Ok(())
+}
+
 fn protocol(key: &Value) -> &'static str {
     match key["group"]["platform"].as_str().unwrap_or("") {
-        "anthropic" => "anthropic-messages",
-        "openai" => "openai-responses",
-        "deepseek" | "kimi" | "zhipu" | "minimax" | "grok" | "opencode_go" | "typesafe" => {
+        "anthropic" | "minimax" => "anthropic-messages",
+        "openai" | "grok" => "openai-responses",
+        "deepseek" | "kimi" | "zhipu" | "opencode_go" | "typesafe" => {
             "openai-completions"
         }
         _ => "unknown",
@@ -338,7 +357,8 @@ fn usable(key: &Value) -> bool {
             .is_none_or(|time| time.timestamp() > chrono::Utc::now().timestamp())
 }
 async fn selected_key(id: i64) -> Result<Value, String> {
-    let key = portal(&format!("/keys/{id}")).await?;
+    let mut key = portal(&format!("/keys/{id}")).await?;
+    hydrate_groups(std::slice::from_mut(&mut key)).await?;
     if !usable(&key) {
         return Err("该密钥已停用、到期或额度不足，请同步后重新选择".into());
     }
@@ -352,12 +372,15 @@ async fn selected_key(id: i64) -> Result<Value, String> {
 #[tauri::command]
 pub async fn nftai_snapshot() -> Result<Value, String> {
     let user = portal("/auth/me").await?;
-    let keys = all_keys()
-        .await?
+    let mut keys = all_keys().await?;
+    hydrate_groups(&mut keys).await?;
+    let keys = keys
         .into_iter()
         .map(|key| {
             json!({"id":key["id"],"name":key["name"],"group":key["group"]["name"],
             "protocol":protocol(&key),"usable":usable(&key),"status":key["status"],
+            "codex_cli_only":key["group"]["codex_cli_only"] == true,
+            "claude_code_only":key["group"]["claude_code_only"] == true,
             "quota":key["quota"],"quota_used":key["quota_used"],"expires_at":key["expires_at"]})
         })
         .collect::<Vec<_>>();
@@ -366,9 +389,26 @@ pub async fn nftai_snapshot() -> Result<Value, String> {
     )
 }
 async fn models_for(key: &Value) -> Result<Vec<String>, String> {
+    if let Some(id) = group_id(key) {
+        let channels = portal("/channels/available").await?;
+        if let Some(models) = channel_models(&channels, id) {
+            return checked_models(models);
+        }
+    }
+    if matches!(key["group"]["platform"].as_str(), Some("deepseek" | "anthropic")) {
+        if let Ok(response) = client()?.get("https://nftai.fun/pricing-data.json")
+            .header(reqwest::header::CACHE_CONTROL, "no-cache").send().await {
+            if let Ok(catalog) = decode(response).await {
+                if let Some(models) = public_group_models(&catalog, &key["group"]) {
+                    return checked_models(models);
+                }
+            }
+        }
+    }
     let result = decode(
         client()?
             .get(format!("{ORIGIN}/v1/models"))
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
             .bearer_auth(key["key"].as_str().ok_or("密钥缺失")?)
             .send()
             .await
@@ -379,10 +419,40 @@ async fn models_for(key: &Value) -> Result<Vec<String>, String> {
         .as_array()
         .or_else(|| result["data"].as_array())
         .ok_or("模型列表格式异常")?;
-    let mut ids = array
+    let ids = array
         .iter()
-        .filter_map(|v| v["id"].as_str().map(String::from))
+        .filter_map(|v| v["id"].as_str())
+        .filter(|id| match key["group"]["platform"].as_str() {
+            Some("deepseek") => id.to_ascii_lowercase().starts_with("deepseek"),
+            Some("anthropic") => id.to_ascii_lowercase().starts_with("claude"),
+            _ => true,
+        })
+        .map(String::from)
         .collect::<Vec<_>>();
+    checked_models(ids)
+}
+
+fn channel_models(channels: &Value, id: i64) -> Option<Vec<String>> {
+    let mut result = None;
+    for section in channels.as_array()?.iter().flat_map(|channel| channel["platforms"].as_array()).flatten() {
+        if section["groups"].as_array().into_iter().flatten().any(|group| group["id"] == id) {
+            result.get_or_insert_with(Vec::new).extend(section["supported_models"].as_array().into_iter().flatten()
+                .filter_map(|model| model["name"].as_str()).map(String::from));
+        }
+    }
+    result
+}
+
+fn public_group_models(catalog: &Value, group: &Value) -> Option<Vec<String>> {
+    let name = group["name"].as_str()?;
+    let platform = group["platform"].as_str()?;
+    let entry = catalog["vendors"].as_array()?.iter().flat_map(|vendor| vendor["groups"].as_array()).flatten()
+        .find(|entry| entry["name"] == name && entry["platform"] == platform)?;
+    Some(entry["models"].as_array()?.iter().filter_map(|model| model["id"].as_str()).map(String::from).collect())
+}
+
+fn checked_models(mut ids: Vec<String>) -> Result<Vec<String>, String> {
+    ids.retain(|id| !id.is_empty() && id.trim() == id && !id.chars().any(char::is_control) && !id.contains('*'));
     ids.sort();
     ids.dedup();
     if ids.is_empty() {
@@ -391,52 +461,101 @@ async fn models_for(key: &Value) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 #[tauri::command]
-pub async fn nftai_models(key_id: i64) -> Result<Vec<String>, String> {
-    models_for(&selected_key(key_id).await?).await
+pub async fn nftai_models(key_id: i64, tool: String) -> Result<Vec<String>, String> {
+    models_for_tool(&selected_key(key_id).await?, &tool).await
+}
+
+async fn models_for_tool(key: &Value, tool: &str) -> Result<Vec<String>, String> {
+    if !compatible(tool, protocol(key))
+        || (key["group"]["codex_cli_only"] == true && tool != "codex")
+        || (key["group"]["claude_code_only"] == true && tool != "claude")
+    {
+        return Err("该密钥分组的协议或客户端限制不适用于此工具，请选择其他密钥".into());
+    }
+    models_for(key).await
 }
 
 fn compatible(app: &str, api: &str) -> bool {
-    match app {
-        "claude" => api == "anthropic-messages",
-        "codex" => api == "openai-responses",
-        "dsh" | "opencode" => matches!(
-            api,
-            "anthropic-messages" | "openai-responses" | "openai-completions"
-        ),
-        _ => false,
+    matches!(app, "claude" | "codex" | "dsh" | "opencode")
+        && matches!(api, "anthropic-messages" | "openai-responses" | "openai-completions")
+}
+
+fn upstream_format(api: &str) -> &'static str {
+    match api {
+        "anthropic-messages" => "anthropic",
+        "openai-completions" => "openai_chat",
+        _ => "openai_responses",
     }
 }
-fn provider_config(app: &str, api: &str, secret: &str, model: &str) -> Result<Value, String> {
+fn provider_config(
+    app: &str,
+    api: &str,
+    secret: &str,
+    model: &str,
+    available_models: &[String],
+) -> Result<Value, String> {
     if !compatible(app, api) {
         return Err("该密钥分组的协议不适用于此工具，请选择其他密钥".into());
     }
     let base = format!("{ORIGIN}/v1");
-    let models = json!({model:{"name":model}});
+    if !available_models.iter().any(|id| id == model) {
+        return Err("模型不属于该密钥，请重新获取模型列表".into());
+    }
     Ok(match app {
-        "claude" => json!({"env":{"ANTHROPIC_BASE_URL":ORIGIN,"ANTHROPIC_AUTH_TOKEN":secret,
+        "claude" => json!({"env":{"ANTHROPIC_BASE_URL":if api == "anthropic-messages" { ORIGIN } else { &base },"ANTHROPIC_AUTH_TOKEN":secret,
             "ANTHROPIC_MODEL":model,"ANTHROPIC_DEFAULT_OPUS_MODEL":model,
             "ANTHROPIC_DEFAULT_SONNET_MODEL":model,"ANTHROPIC_DEFAULT_HAIKU_MODEL":model}}),
-        "codex" => json!({"auth":{"OPENAI_API_KEY":secret}, "config":format!(
-            "model_provider = \"custom\"\nmodel = {}\n\n[model_providers.custom]\nname = \"NFTAI\"\nbase_url = {}\nwire_api = \"responses\"\nrequires_openai_auth = true\n",json!(model),json!(base))}),
+        "codex" => with_codex_catalog(json!({"auth":{"OPENAI_API_KEY":secret}, "apiFormat":upstream_format(api), "config":format!(
+            "model_provider = \"custom\"\nmodel = {}\n\n[model_providers.custom]\nname = \"NFTAI\"\nbase_url = {}\nwire_api = \"responses\"\nrequires_openai_auth = true\n",json!(model),json!(base))}), available_models),
         "dsh" => json!({"name":"NFTAI","kind":"custom","enabled":true,"api":api,
-            "options":{"baseURL":base,"apiKey":secret},"models":models}),
+            "options":{"baseURL":base,"apiKey":secret},"models":named_models(available_models)}),
         "opencode" => {
             json!({"name":"NFTAI","npm":match api {"anthropic-messages"=>"@ai-sdk/anthropic", "openai-responses"=>"@ai-sdk/openai",_=>"@ai-sdk/openai-compatible"},
-            "options":{"baseURL":base,"apiKey":secret},"models":models})
+            "options":{"baseURL":base,"apiKey":secret},"models":named_models(available_models)})
         }
         _ => unreachable!(),
     })
 }
-fn configure_desktop_provider(provider: &mut crate::Provider, model: &str) -> Result<(), String> {
-    if !crate::claude_desktop_config::is_claude_safe_model_id(model) {
-        return Err("Claude 桌面版直连需要 Claude 模型，请选择 claude-* 模型".into());
-    }
+fn named_models(models: &[String]) -> serde_json::Map<String, Value> {
+    models
+        .iter()
+        .map(|model| (model.clone(), json!({"name": model})))
+        .collect()
+}
+
+fn with_codex_catalog(mut settings: Value, models: &[String]) -> Value {
+    let entries = models
+        .iter()
+        .map(|model| json!({"model": model}))
+        .collect::<Vec<_>>();
+    settings["modelCatalog"] = json!({"models": entries});
+    settings
+}
+fn configure_desktop_provider(
+    provider: &mut crate::Provider,
+    api: &str,
+    model: &str,
+    available_models: &[String],
+) -> bool {
+    let proxy = api != "anthropic-messages"
+        || available_models
+            .iter()
+            .any(|id| !crate::claude_desktop_config::is_claude_safe_model_id(id));
     let mut meta = crate::provider::ProviderMeta::default();
-    meta.claude_desktop_model_routes.insert(model.to_string(), crate::provider::ClaudeDesktopModelRoute {
-        model: model.to_string(), label_override: None, supports_1m: None,
-    });
+    if proxy {
+        meta.claude_desktop_mode = Some(crate::provider::ClaudeDesktopMode::Proxy);
+        meta.api_format = Some(upstream_format(api).to_string());
+    }
+    for id in std::iter::once(model)
+        .chain(available_models.iter().map(String::as_str).filter(|id| *id != model))
+        .take(crate::claude_desktop_config::MAX_INFERENCE_MODELS)
+    {
+        meta.claude_desktop_model_routes.insert(id.to_string(), crate::provider::ClaudeDesktopModelRoute {
+            model: id.to_string(), label_override: None, supports_1m: None,
+        });
+    }
     provider.meta = Some(meta);
-    Ok(())
+    proxy
 }
 #[tauri::command]
 pub async fn nftai_apply(
@@ -446,16 +565,16 @@ pub async fn nftai_apply(
     model: String,
 ) -> Result<Value, String> {
     let key = selected_key(key_id).await?;
-    if !models_for(&key).await?.contains(&model) {
-        return Err("模型不属于该密钥，请重新获取模型列表".into());
-    }
+    let models = models_for_tool(&key, &tool).await?;
+    let api = protocol(&key);
     let settings = provider_config(
         &tool,
-        protocol(&key),
+        api,
         key["key"].as_str().ok_or("密钥缺失")?,
         &model,
+        &models,
     )?;
-    let id = format!(
+    let mut id = format!(
         "nftai-{}-{key_id}",
         key["user_id"].as_i64().ok_or("密钥缺少账户归属")?
     );
@@ -465,9 +584,14 @@ pub async fn nftai_apply(
         settings,
         Some("https://nftai.fun".into()),
     );
-    // Persist to Desktop's own store and 3P profile, never CLI settings.
-    if tool == "claude" {
-        configure_desktop_provider(&mut provider, &model)?;
+    let routed = match tool.as_str() {
+        "claude" => configure_desktop_provider(&mut provider, api, &model, &models),
+        "codex" => api != "openai-responses",
+        _ => false,
+    };
+    if routed {
+        id.push_str("-routed");
+        provider.id = id.clone();
     }
     let tool = if tool == "claude" { "claude-desktop".to_string() } else { tool };
     let existing = crate::commands::get_providers(app.state(), tool.clone()).await?;
@@ -477,7 +601,23 @@ pub async fn nftai_apply(
         crate::commands::add_provider(app.clone(), tool.clone(), provider, Some(true), None)
             .await?;
     }
-    let warnings = if matches!(tool.as_str(), "claude-desktop" | "codex") {
+    let needs_activation = match tool.as_str() {
+        "dsh" => !crate::dsh_config::provider_key_exists(&id).map_err(|err| err.to_string())?,
+        "opencode" => !crate::opencode_config::get_providers()
+            .map_err(|err| err.to_string())?
+            .contains_key(&id),
+        _ => true,
+    };
+    let routed_app = match tool.as_str() {
+        "codex" => Some(crate::AppType::Codex),
+        "claude-desktop" => Some(crate::AppType::ClaudeDesktop),
+        _ => None,
+    };
+    let proxy_app = routed_app.filter(|app| routed || crate::mode::current::is_proxy(app));
+    let warnings = if let Some(target) = proxy_app.as_ref() {
+        crate::mode::controller::enter_with_route(app.state::<crate::AppState>().inner(), target, false, Some(&id)).await?;
+        Vec::new()
+    } else if needs_activation {
         crate::commands::switch_provider(app.clone(), tool.clone(), id.clone())
             .await?
             .warnings
@@ -488,9 +628,17 @@ pub async fn nftai_apply(
         crate::opencode_config::set_default_model(&format!("{id}/{model}"))
             .map_err(|_| "已导入密钥，但设置默认模型失败，请在工具内选择模型")?;
     }
-    Ok(
-        json!({"providerId":id,"warnings":warnings,"message":if tool=="dsh" {"已导入。首次打开 DSH 时，在模型选择器中选择 NFTAI 下的模型。"} else {"已配置。请新开会话，或完全退出并重启工具后使用。"}}),
-    )
+    Ok(json!({"providerId":id,"warnings":warnings,"message":if tool=="dsh" {
+        format!("已同步 {} 个模型。请在 DSH 模型选择器中选择 NFTAI；如果列表未刷新，请重启 DSH。", models.len())
+    } else {
+        let count = if tool == "claude-desktop" {
+            models.len().min(crate::claude_desktop_config::MAX_INFERENCE_MODELS)
+        } else {
+            models.len()
+        };
+        let routing = if proxy_app.is_some() { "使用此配置时请保持工具箱运行。" } else { "" };
+        format!("已同步 {count} 个模型。请新开会话；如果列表未刷新，请完全退出并重启工具。{routing}")
+    }}))
 }
 
 #[tauri::command]
@@ -503,16 +651,106 @@ pub async fn nftai_launch(tool: String) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn group_catalogs_do_not_mix_keys_or_platforms() {
+        let channels = json!([{"platforms":[
+            {"groups":[{"id":2}],"supported_models":[{"name":"claude-fable-5"}]},
+            {"groups":[{"id":19}],"supported_models":[{"name":"deepseek-future"}]}
+        ]}]);
+        assert_eq!(channel_models(&channels, 19).unwrap(), ["deepseek-future"]);
+        assert_eq!(channel_models(&channels, 2).unwrap(), ["claude-fable-5"]);
+        assert_eq!(channel_models(&channels, 42), None);
+        let mut key = json!({"group_id":2});
+        fill_group(&mut key, &json!([{"id":2,"name":"Claude Plus","platform":"anthropic"}]));
+        assert_eq!(protocol(&key), "anthropic-messages");
+        let catalog = json!({"vendors":[{"groups":[
+            {"name":"DS","platform":"deepseek","models":[{"id":"deepseek-chat"}]},
+            {"name":"Claude Plus","platform":"anthropic","models":[{"id":"claude-next"}]}
+        ]}]});
+        assert_eq!(public_group_models(&catalog, &key["group"]).unwrap(), ["claude-next"]);
+    }
+    #[test]
+    fn codex_catalog_contains_all_models_for_the_selected_key() {
+        let models = ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-sol"].map(String::from);
+        let settings =
+            provider_config("codex", "openai-responses", "test-secret", &models[2], &models).unwrap();
+        let config = settings["config"].as_str().unwrap();
+        let plan = crate::codex_config::plan_codex_model_catalog(
+            &settings,
+            config,
+            crate::codex_config::CodexCatalogToolProfile::NativeResponses,
+        )
+        .unwrap();
+        let catalog = plan.catalog.unwrap();
+        let slugs = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["slug"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(slugs, ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-sol"]);
+        let parsed: toml::Value = config.parse().unwrap();
+        assert_eq!(parsed["model"].as_str(), Some("gpt-6.1-sol"));
+    }
+    #[test]
+    fn dsh_and_opencode_import_all_key_models() {
+        let models = ["existing-model", "future-model"].map(String::from);
+        for tool in ["dsh", "opencode"] {
+            let config = provider_config(tool, "openai-responses", "test-secret", &models[0], &models).unwrap();
+            assert_eq!(config["models"], json!({
+                "existing-model": {"name": "existing-model"},
+                "future-model": {"name": "future-model"}
+            }));
+            assert!(provider_config(tool, "openai-responses", "test-secret", "removed-model", &models).is_err());
+        }
+    }
+    #[test]
     fn desktop_profile_contains_selected_gateway_and_model() {
-        let settings = provider_config("claude", "anthropic-messages", "test-secret", "claude-sonnet-4-5").unwrap();
+        let models = ["claude-sonnet-4-5", "claude-opus-4-8"].map(String::from);
+        let settings = provider_config("claude", "anthropic-messages", "test-secret", &models[0], &models).unwrap();
         let mut provider = crate::Provider::with_id("test".into(), "test".into(), settings, None);
-        configure_desktop_provider(&mut provider, "claude-sonnet-4-5").unwrap();
+        assert!(!configure_desktop_provider(&mut provider, "anthropic-messages", &models[0], &models));
         let profile = crate::claude_desktop_config::direct_target(Some(&provider)).unwrap().unwrap();
         assert_eq!(profile["inferenceProvider"], "gateway");
         assert_eq!(profile["inferenceGatewayBaseUrl"], ORIGIN);
         assert_eq!(profile["inferenceGatewayApiKey"], "test-secret");
-        assert_eq!(profile["inferenceModels"][0], "claude-sonnet-4-5");
-        assert!(configure_desktop_provider(&mut provider, "deepseek-chat").is_err());
+        let menu = profile["inferenceModels"].as_array().unwrap();
+        assert_eq!(menu.len(), 2);
+        assert!(menu.contains(&json!("claude-sonnet-4-5")));
+        assert!(menu.contains(&json!("claude-opus-4-8")));
+    }
+    #[test]
+    fn desktop_routes_non_claude_model_alias_to_original_model() {
+        let models = ["deepseek-chat", "kimi-k3"].map(String::from);
+        let api = "openai-completions";
+        let settings = provider_config("claude", api, "test-secret", &models[0], &models).unwrap();
+        let mut provider = crate::Provider::with_id("test".into(), "test".into(), settings, None);
+        assert!(configure_desktop_provider(&mut provider, api, &models[0], &models));
+        crate::claude_desktop_config::validate_proxy_provider(&provider).unwrap();
+        let routes = crate::claude_desktop_config::proxy_model_routes(&provider).unwrap();
+        assert_eq!(routes.len(), 2);
+        for route in routes {
+            let request = crate::claude_desktop_config::map_proxy_request_model(
+                json!({"model":route.route_id}),
+                &provider,
+            ).unwrap();
+            assert_eq!(request["model"], route.upstream_model);
+        }
+    }
+    #[test]
+    fn codex_uses_responses_to_client_and_bridges_upstream_protocol() {
+        use crate::proxy::providers::{
+            should_convert_codex_responses_to_anthropic, should_convert_codex_responses_to_chat,
+        };
+        let models = ["non-gpt-model"].map(String::from);
+        for api in ["openai-completions", "anthropic-messages", "openai-responses"] {
+            let settings = provider_config("codex", api, "test-secret", &models[0], &models).unwrap();
+            let config: toml::Value = settings["config"].as_str().unwrap().parse().unwrap();
+            assert_eq!(config["model_providers"]["custom"]["wire_api"].as_str(), Some("responses"));
+            assert_eq!(config["model"].as_str(), Some("non-gpt-model"));
+            let provider = crate::Provider::with_id("test".into(), "test".into(), settings, None);
+            assert_eq!(should_convert_codex_responses_to_chat(&provider, "/v1/responses"), api == "openai-completions");
+            assert_eq!(should_convert_codex_responses_to_anthropic(&provider, "/v1/responses"), api == "anthropic-messages");
+        }
     }
     #[tokio::test]
     async fn successful_login_commits_html_before_navigating_home() {
@@ -541,8 +779,12 @@ mod tests {
             protocol(&json!({"group":{"platform":"composite"}})),
             "unknown"
         );
-        assert!(!compatible("codex", "openai-completions"));
-        assert!(!compatible("claude", "openai-responses"));
+        for tool in ["codex", "claude", "opencode", "dsh"] {
+            assert!(!compatible(tool, "unknown"));
+            assert!(compatible(tool, "openai-completions"));
+            assert!(compatible(tool, "openai-responses"));
+            assert!(compatible(tool, "anthropic-messages"));
+        }
     }
     #[test]
     fn callback_requires_our_origin_and_nonce() {
@@ -559,17 +801,19 @@ mod tests {
     }
     #[test]
     fn toml_model_is_escaped_and_other_models_are_untouched() {
+        let model = "model\"\nmalicious=true";
         let config = provider_config(
             "codex",
             "openai-responses",
             "secret",
-            "model\"\nmalicious=true",
+            model,
+            &[model.to_string()],
         )
         .unwrap();
         let parsed: toml::Value = config["config"].as_str().unwrap().parse().unwrap();
-        assert_eq!(parsed["model"].as_str().unwrap(), "model\"\nmalicious=true");
+        assert_eq!(parsed["model"].as_str().unwrap(), model);
         assert!(parsed.get("malicious").is_none());
-        assert!(provider_config("claude", "openai-completions", "secret", "ds").is_err());
+        assert!(provider_config("claude", "unknown", "secret", "ds", &["ds".into()]).is_err());
     }
     #[test]
     fn expired_keys_are_unusable() {

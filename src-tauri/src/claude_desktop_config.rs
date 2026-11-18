@@ -29,7 +29,7 @@ const GATEWAY_TOKEN_SETTING_KEY: &str = "claude_desktop_gateway_token";
 const CLAUDE_DESKTOP_PROXY_PREFIX: &str = "/claude-desktop";
 pub const DEFAULT_CREATED_AT: &str = "2024-01-01T00:00:00Z";
 /// `inferenceModels` 的上限（Desktop 的 schema 写着 `maxItems: 200`）。
-const MAX_INFERENCE_MODELS: usize = 200;
+pub(crate) const MAX_INFERENCE_MODELS: usize = 200;
 const MIMO_REDACTED_THINKING_PLACEHOLDER: &str = "[redacted thinking]";
 const MIMO_TOOL_CALL_THINKING_PLACEHOLDER: &str = "tool call";
 
